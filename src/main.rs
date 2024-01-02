@@ -8,7 +8,7 @@ use serde_json;
 use reqwest::Url;
 
 
-static BOT_TOKENS: &str = "[YOUR_API_KEYS_HERE]";
+static BOT_TOKENS: &str = "[\"YOUR_API_KEY_HERE\"]";
 static PORT: u16 = 8085;
 static TELEGRAM_API_URL: &str = "http://127.0.0.1:8081";
 
