@@ -196,7 +196,7 @@ async fn telegram_request(
 }
 
 
-pub fn make_axum_app(mut options: Options, ) -> (StopFlag, BotsManager) {
+pub fn make_axum_app(mut options: Options, ) -> (impl Future<Output = ()>, BotsManager) {
     let Options { address, ref url, .. } = options;
     let address = address.clone();
     let path = format!("{}/:bot_id", url.path());
@@ -214,10 +214,15 @@ pub fn make_axum_app(mut options: Options, ) -> (StopFlag, BotsManager) {
     };
 
     let delete_webhook_stop_flag = stop_flag.clone().then(|()| async move {
-        let tx = match origin.read().unwrap().clone() {
-            None => return,
-            Some(tx) => tx,
-        };
+        let tx;
+        {
+            let mut lock_guard = origin.write().unwrap();
+            tx = match lock_guard.clone() {
+                None => return,
+                Some(tx) => tx,
+            };
+            lock_guard.take();    
+        }
         for (_, bot) in tx.into_values() {
             // This assignment is needed to not require `R: Sync` since without it `&bot`
             // temporary lives across `.await` points.
@@ -236,7 +241,7 @@ pub fn make_axum_app(mut options: Options, ) -> (StopFlag, BotsManager) {
     tokio::spawn(async move {
         axum::Server::bind(&address)
             .serve(app.into_make_service())
-            .with_graceful_shutdown(delete_webhook_stop_flag)
+            .with_graceful_shutdown(stop_flag)
             .await
             .map_err(|err| {
                 stop_token_for_server.stop();
@@ -244,7 +249,13 @@ pub fn make_axum_app(mut options: Options, ) -> (StopFlag, BotsManager) {
             })
             .expect("Axum server error");
     });
-    (stop_flag, BotsManager{senders, stop_token, options})
+    let stop_token_for_handler = stop_token.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Failed to listen for ^C");
+        println!("Stopping");
+        stop_token_for_handler.stop();
+    });
+    (delete_webhook_stop_flag, BotsManager{senders, stop_token, options})
 }
 
 

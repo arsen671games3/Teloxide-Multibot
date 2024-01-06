@@ -1,5 +1,8 @@
 mod axum_app;
 
+use std::sync::Arc;
+
+use axum_app::BotsManager;
 use futures::future::join_all;
 
 use tokio;
@@ -17,10 +20,17 @@ fn make_bot(token: &String) -> Bot{
         .set_api_url(Url::parse(&TELEGRAM_API_URL).expect("TELEGRAM_API_URL error"))
 }
 
+async fn handler(bot: Bot, bots_manager: Arc<BotsManager>, msg: Message) -> Result<(), teloxide::RequestError> {
+    bot.send_message(msg.chat.id, "pong").await?;
+    let me = bot.get_me().await?;
+    axum_app::stop_bot(me.id.0, &bots_manager.clone()).await;
+    Ok(())
+}
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let idle;
+    pretty_env_logger::init();
     {
         let bot_tokens: String = std::env::var("BOT_TOKENS").ok().expect("The BOT_TOKENS env variable needs to be set");
         let bot_tokens: Vec<String> = serde_json::from_str(&bot_tokens).expect("BOT_TOKENS error");
@@ -46,22 +56,23 @@ async fn main() {
             .await
             .expect("Error while starting bot"), bot)
         })).await;
-
-        axum_app::stop_bot(
-            axum_app::get_bot_id_from_bot_token(&bot_tokens[0]).unwrap(),
-            &bots_manager
-        ).await;
+        let bots_manager_reference = Arc::new(bots_manager);
 
         for (listener, bot) in listeners_and_bots {
-            tokio::spawn(teloxide::repl_with_listener(
-                bot,
-                |bot: Bot, msg: Message| async move {
-                    bot.send_message(msg.chat.id, "pong").await?;
-                    Ok(())
-                },
-                listener,
-            ));
+            let bots_manager_reference_clone = bots_manager_reference.clone();
+            tokio::spawn((|| async move {
+                Dispatcher::builder(bot, Update::filter_message().endpoint(handler))
+                .default_handler(|_upd| Box::pin(async {}))
+                .dependencies(dptree::deps![bots_manager_reference_clone])
+                .enable_ctrlc_handler()
+                .build()
+                .dispatch_with_listener(
+                    listener,
+                    LoggingErrorHandler::with_custom_text("An error from the update listener")
+                ).await 
+            })());
         };
     }
+    println!("idling");
     idle.await;
 }
